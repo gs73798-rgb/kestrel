@@ -16,7 +16,7 @@ MAX_HISTORY = 12000
 # 这些文件最可能直接影响 agent 的行动方式。
 # 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
-IGNORED_PATH_NAMES = {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
+IGNORED_PATH_NAMES = {".git", ".kestrel", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
 
 def now():
@@ -69,11 +69,17 @@ class WorkspaceContext:
             except Exception:
                 return fallback
 
+        toplevel = git(["rev-parse", "--show-toplevel"])
         repo_root = (
             Path(repo_root_override).resolve()
             if repo_root_override is not None
-            else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
+            else Path(toplevel or str(cwd)).resolve()
         )
+
+        def repo_git(args, fallback=""):
+            # 不在 git 仓库里时，后面的查询必然失败；直接用 fallback，省掉每次构建的几次子进程调用。
+            return git(args, fallback) if toplevel else fallback
+
         docs = {}
         # 同时扫描 repo_root 和 cwd，这样在子目录启动时也能看到本地文档；
         # 但用相对路径做 key，避免同一份文档被重复收集。
@@ -90,12 +96,12 @@ class WorkspaceContext:
         return cls(
             cwd=str(cwd),
             repo_root=str(repo_root),
-            branch=git(["branch", "--show-current"], "-") or "-",
+            branch=repo_git(["branch", "--show-current"], "-") or "-",
             default_branch=(
                 lambda branch: branch[len("origin/") :] if branch.startswith("origin/") else branch
-            )(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main") or "origin/main"),
-            status=clip(git(["status", "--short"], "clean") or "clean", 1500),
-            recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
+            )(repo_git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main") or "origin/main"),
+            status=clip(repo_git(["status", "--short"], "clean") or "clean", 1500),
+            recent_commits=[line for line in repo_git(["log", "--oneline", "-5"]).splitlines() if line],
             project_docs=docs,
         )
 

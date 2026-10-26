@@ -6,12 +6,50 @@ runtime 只关心一件事：给我一个 prompt，我拿回一段文本。
 """
 
 import json
+import random
 import time
 from http.client import RemoteDisconnected
 import urllib.error
 import urllib.request
 
-OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1"
+OPENAI_COMPATIBLE_USER_AGENT = "kestrel/0.1"
+# 限流（429）和服务端暂时不可用（5xx）值得重试；其它 4xx（key 错误、参数错误）重试没有意义。
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_ATTEMPTS = 3
+MAX_RETRY_AFTER_SECONDS = 10
+
+
+def _backoff_seconds(attempt, retry_after=None):
+    # 指数退避加抖动，避免多个请求同时重试；服务端给了 Retry-After 就以它为准（设上限）。
+    if retry_after is not None:
+        try:
+            return min(float(retry_after), MAX_RETRY_AFTER_SECONDS)
+        except ValueError:
+            pass
+    return 0.5 * (2**attempt) + random.uniform(0, 0.25)
+
+
+def _post_with_retry(request, timeout, sleep=time.sleep):
+    """发送请求，返回 (响应正文, Content-Type)。
+
+    限流、5xx 和网络异常会退避重试；最后一次仍失败时把原始异常抛给调用方，
+    由各 provider 转换成自己的错误信息。
+    """
+    for attempt in range(MAX_ATTEMPTS):
+        last_attempt = attempt == MAX_ATTEMPTS - 1
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                headers = getattr(response, "headers", None) or {}
+                return response.read().decode("utf-8"), headers.get("Content-Type", "")
+        except urllib.error.HTTPError as exc:
+            if exc.code not in RETRYABLE_STATUS_CODES or last_attempt:
+                raise
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            sleep(_backoff_seconds(attempt, retry_after))
+        except (urllib.error.URLError, RemoteDisconnected):
+            if last_attempt:
+                raise
+            sleep(_backoff_seconds(attempt))
 
 
 class FakeModelClient:
@@ -63,12 +101,11 @@ class OllamaModelClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            body_text, _ = _post_with_retry(request, self.timeout)
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, RemoteDisconnected) as exc:
             raise RuntimeError(
                 "Could not reach Ollama.\n"
                 "Make sure `ollama serve` is running and the model is available.\n"
@@ -76,6 +113,7 @@ class OllamaModelClient:
                 f"Model: {self.model}"
             ) from exc
 
+        data = json.loads(body_text)
         if data.get("error"):
             raise RuntimeError(f"Ollama error: {data['error']}")
         return data.get("response", "")
@@ -249,7 +287,7 @@ class OpenAICompatibleModelClient:
           `self.last_completion_metadata`
 
         在 agent 链路里的位置：
-        它位于 `Pico.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
+        它位于 `Kestrel.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
         落到 provider API 的地方。
         """
         self.last_completion_metadata = {}
@@ -292,29 +330,17 @@ class OpenAICompatibleModelClient:
             headers=headers,
             method="POST",
         )
-        attempts = 3
-        for attempt in range(attempts):
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    body_text = response.read().decode("utf-8")
-                    headers = getattr(response, "headers", {}) or {}
-                    content_type = headers.get("Content-Type", "")
-                break
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                if exc.code >= 500 and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
-                if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(
-                    "Could not reach the OpenAI-compatible backend.\n"
-                    f"Base URL: {self.base_url}\n"
-                    f"Model: {self.model}"
-                ) from exc
+        try:
+            body_text, content_type = _post_with_retry(request, self.timeout)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
+        except (urllib.error.URLError, RemoteDisconnected) as exc:
+            raise RuntimeError(
+                "Could not reach the OpenAI-compatible backend.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
 
         # 有些兼容后端返回普通 JSON，有些返回 SSE。
         # 这里两种都接住，并尽量统一抽取文本和 usage/cache 元数据。
@@ -405,27 +431,17 @@ class AnthropicCompatibleModelClient:
             headers=headers,
             method="POST",
         )
-        attempts = 3
-        for attempt in range(attempts):
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    body_text = response.read().decode("utf-8")
-                break
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                if exc.code >= 500 and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(f"Anthropic-compatible request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
-                if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(
-                    "Could not reach the Anthropic-compatible backend.\n"
-                    f"Base URL: {self.base_url}\n"
-                    f"Model: {self.model}"
-                ) from exc
+        try:
+            body_text, _ = _post_with_retry(request, self.timeout)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Anthropic-compatible request failed with HTTP {exc.code}: {body}") from exc
+        except (urllib.error.URLError, RemoteDisconnected) as exc:
+            raise RuntimeError(
+                "Could not reach the Anthropic-compatible backend.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
 
         try:
             data = json.loads(body_text)

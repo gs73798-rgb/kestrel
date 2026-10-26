@@ -30,6 +30,15 @@ CURRENT_REQUEST_SECTION = "current_request"
 RELEVANT_MEMORY_LIMIT = 3
 
 
+def estimate_tokens(text):
+    # 粗略估算：ASCII 大约 4 个字符一个 token，中文等非 ASCII 大约一个字符一个 token。
+    # 这只用于预算前后的观测对照，不是真实 tokenizer；真实用量以 API 返回的 usage 为准。
+    text = str(text)
+    ascii_chars = sum(1 for char in text if ord(char) < 128)
+    # 向上取整，短文本不会被低估成 0。
+    return (ascii_chars + 3) // 4 + (len(text) - ascii_chars)
+
+
 def _tail_clip(text, limit):
     text = str(text)
     if limit <= 0:
@@ -92,7 +101,7 @@ class ContextManager:
           是怎么被拼出来的。
 
         在 agent 链路里的位置：
-        它位于 `Pico.ask()` 的每轮模型调用之前，是“真正发请求给模型”
+        它位于 `Kestrel.ask()` 的每轮模型调用之前，是“真正发请求给模型”
         的最后一道组装工序。`WorkspaceContext` 提供稳定前缀，`LayeredMemory`
         提供工作记忆，这个函数则把它们和当前请求合成一份可控大小的 prompt。
         """
@@ -468,6 +477,7 @@ class ContextManager:
         }
         return {
             "prompt_chars": len(prompt),
+            "prompt_tokens_estimate": estimate_tokens(prompt),
             "prompt_budget_chars": self.total_budget,
             "prompt_over_budget": len(prompt) > self.total_budget,
             "section_order": list(SECTION_ORDER),

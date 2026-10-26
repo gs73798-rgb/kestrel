@@ -1,11 +1,11 @@
 from .providers import FakeModelClient
-from .runtime import Pico
+from .runtime import Kestrel
 from .state import RunStore, TaskState
 from .workspace import Workspace
 
 __all__ = [
     "FakeModelClient",
-    "Pico",
+    "Kestrel",
     "RunStore",
     "TaskState",
     "Workspace",

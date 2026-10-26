@@ -4,8 +4,9 @@ from collections import Counter
 
 import pytest
 
-from pico.evaluation.evaluator import (
+from kestrel.evaluation.evaluator import (
     BenchmarkEvaluator,
+    _current_locale,
     load_benchmark,
     run_harness_regression_v2,
     run_fixed_benchmark,
@@ -115,7 +116,9 @@ def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
         "max_new_tokens": 64,
     }
     assert reproducibility["timezone"] == "Asia/Shanghai"
-    assert reproducibility["locale"] == "C.UTF-8"
+    # locale 记录的是运行机器上的真实值（Linux 上常是 C.UTF-8，Windows 上是 Chinese (Simplified)_China.936），
+    # 这里只校验 artifact 确实记录了当前 locale。
+    assert reproducibility["locale"] == _current_locale()
 
     for row in artifact["rows"]:
         assert not row["fixture_copy_relpath"].startswith("/")

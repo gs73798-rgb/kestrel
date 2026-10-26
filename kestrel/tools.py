@@ -4,12 +4,17 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+import os
 import shutil
 import subprocess
 import textwrap
 from functools import partial
+from pathlib import Path
 
 from .workspace import IGNORED_PATH_NAMES
+
+# 回退搜索（没有 rg 时）跳过的文件：超过这个大小的文件基本是产物或数据，逐行扫描只会拖慢搜索。
+MAX_FALLBACK_SEARCH_BYTES = 1_000_000
 
 BASE_TOOL_SPECS = {
     "list_files": {
@@ -180,6 +185,20 @@ def tool_read_file(context, args):
     return f"# {path.relative_to(context.root)}\n{body}"
 
 
+def _iter_search_files(root):
+    # 用 os.walk 并在下降前剪掉 .git、.venv 这类目录；rglob 会先把它们整棵遍历一遍再过滤。
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in IGNORED_PATH_NAMES]
+        for filename in filenames:
+            yield Path(dirpath) / filename
+
+
+def _looks_binary(file_path):
+    # 和 git 一样的粗略判断：前 8KB 里出现 NUL 字节就当作二进制。
+    with file_path.open("rb") as handle:
+        return b"\0" in handle.read(8192)
+
+
 def tool_search(context, args):
     pattern = str(args.get("pattern", "")).strip()
     if not pattern:
@@ -197,11 +216,10 @@ def tool_search(context, args):
         return result.stdout.strip() or result.stderr.strip() or "(no matches)"
 
     matches = []
-    files = [path] if path.is_file() else [
-        item for item in path.rglob("*")
-        if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(context.root).parts)
-    ]
+    files = [path] if path.is_file() else _iter_search_files(path)
     for file_path in files:
+        if file_path.stat().st_size > MAX_FALLBACK_SEARCH_BYTES or _looks_binary(file_path):
+            continue
         for number, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
             if pattern.lower() in line.lower():
                 matches.append(f"{file_path.relative_to(context.root)}:{number}:{line}")

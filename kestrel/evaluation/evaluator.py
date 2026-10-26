@@ -1,8 +1,11 @@
 import hashlib
 import json
 import locale as locale_module
+import os
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from ..features import memory as memorylib
 from ..providers.clients import FakeModelClient
-from ..runtime import Pico, SessionStore
+from ..runtime import Kestrel, SessionStore
 from ..run_store import RunStore
 from ..task_state import STOP_REASON_FINAL_ANSWER_RETURNED
 from ..tools import legal_tool_names
@@ -38,6 +41,15 @@ REQUIRED_TASK_KEYS = (
     "verifier",
     "category",
 )
+
+
+def _verifier_command(command):
+    # benchmark 的 verifier 写的是 `python3 -c ...`，但 Windows 上通常没有 python3 命令。
+    # 这里把它替换成当前解释器，保证 verifier 和 kestrel 用的是同一个 Python。
+    if not command.startswith("python3 "):
+        return command
+    interpreter = subprocess.list2cmdline([sys.executable]) if os.name == "nt" else shlex.quote(sys.executable)
+    return interpreter + command[len("python3"):]
 
 TASK_FIXTURE_ARTIFACTS = {
     "bench_repo_readme": "README.md",
@@ -390,7 +402,7 @@ class BenchmarkEvaluator:
         self.benchmark_path = Path(benchmark_path)
         self.artifact_path = Path(artifact_path)
         self.workspace_root = Path(workspace_root) if workspace_root is not None else Path(
-            tempfile.mkdtemp(prefix="pico-benchmark-")
+            tempfile.mkdtemp(prefix="kestrel-benchmark-")
         )
         self.model_name = model_name
         self.model_version = model_version
@@ -453,13 +465,13 @@ class BenchmarkEvaluator:
             fixture_copy_root,
             repo_root_override=fixture_copy_root,
         )
-        session_store = SessionStore(fixture_copy_root / ".pico" / "sessions")
-        run_store = RunStore(fixture_copy_root / ".pico" / "runs")
+        session_store = SessionStore(fixture_copy_root / ".kestrel" / "sessions")
+        run_store = RunStore(fixture_copy_root / ".kestrel" / "runs")
         if self.model_client_factory is not None:
             model_client = self.model_client_factory(task=task, workspace=workspace)
         else:
             model_client = FakeModelClient(_scripted_outputs_for_task(task))
-        agent = Pico(
+        agent = Kestrel(
             model_client=model_client,
             workspace=workspace,
             session_store=session_store,
@@ -490,7 +502,7 @@ class BenchmarkEvaluator:
         artifact_digest = _digest_file(artifact_file) if expected_artifact_exists else ""
 
         verifier = subprocess.run(
-            task["verifier"],
+            _verifier_command(task["verifier"]),
             cwd=fixture_copy_root,
             shell=True,
             capture_output=True,

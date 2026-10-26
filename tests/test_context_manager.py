@@ -1,5 +1,12 @@
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
-from pico.context_manager import ContextManager
+from kestrel import FakeModelClient, Kestrel, SessionStore, WorkspaceContext
+from kestrel.context_manager import ContextManager, estimate_tokens
+
+
+def test_estimate_tokens_weights_ascii_and_cjk_differently():
+    assert estimate_tokens("") == 0
+    assert estimate_tokens("abcdefgh") == 2  # 8 个 ASCII 字符约 2 个 token
+    assert estimate_tokens("你好世界") == 4  # 非 ASCII 每个字符按 1 个 token 估
+    assert estimate_tokens("ab你好") == 3
 
 
 def build_workspace(tmp_path):
@@ -9,9 +16,9 @@ def build_workspace(tmp_path):
 
 def build_agent(tmp_path, outputs, **kwargs):
     workspace = build_workspace(tmp_path)
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = SessionStore(tmp_path / ".kestrel" / "sessions")
     approval_policy = kwargs.pop("approval_policy", "auto")
-    return Pico(
+    return Kestrel(
         model_client=FakeModelClient(outputs),
         workspace=workspace,
         session_store=store,
@@ -28,7 +35,7 @@ def test_context_manager_assembles_sections_in_expected_order(tmp_path):
 
     prompt, metadata = ContextManager(agent).build("Where is the deploy key?")
 
-    assert prompt.index("You are pico") < prompt.index("Memory:")
+    assert prompt.index("You are kestrel") < prompt.index("Memory:")
     assert prompt.index("Memory:") < prompt.index("Relevant memory:")
     assert prompt.index("Relevant memory:") < prompt.index("Transcript:")
     assert prompt.index("Transcript:") < prompt.index("Current user request:")
@@ -206,7 +213,7 @@ def test_context_manager_summarizes_older_tool_output_into_one_line(tmp_path):
 
 
 def test_context_manager_relevant_memory_can_mix_durable_notes(tmp_path):
-    memory_root = tmp_path / ".pico" / "memory"
+    memory_root = tmp_path / ".kestrel" / "memory"
     topics_dir = memory_root / "topics"
     topics_dir.mkdir(parents=True)
     (memory_root / "MEMORY.md").write_text(

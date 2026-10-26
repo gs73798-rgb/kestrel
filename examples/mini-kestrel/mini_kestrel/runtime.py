@@ -6,7 +6,7 @@ from .context_manager import ContextManager
 from .tool_executor import ToolExecutor
 
 
-class Pico:
+class Kestrel:
     def __init__(
         self,
         model_client,

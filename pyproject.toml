@@ -3,14 +3,15 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pico"
+name = "kestrel"
 version = "0.1.0"
 description = "Small local coding agent for DeepSeek, OpenAI-compatible, Anthropic-compatible, and Ollama models"
 requires-python = ">=3.10"
-dependencies = []
+# Windows 没有系统时区库，zoneinfo 需要 tzdata 才能解析 "Asia/Shanghai" 这类名字。
+dependencies = ["tzdata>=2024.1; sys_platform == 'win32'"]
 
 [project.scripts]
-pico = "pico.cli:main"
+kestrel = "kestrel.cli:main"
 
 [dependency-groups]
 dev = [
@@ -19,7 +20,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["pico*"]
+include = ["kestrel*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

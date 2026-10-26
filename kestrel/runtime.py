@@ -1,6 +1,6 @@
 """Agent 运行时核心逻辑。
 
-Pico 就是包在模型外面的控制循环：负责组 prompt、解析模型输出、
+Kestrel 就是包在模型外面的控制循环：负责组 prompt、解析模型输出、
 校验并执行工具、写 trace、更新工作记忆，以及在合适的时候停下来。
 """
 
@@ -26,7 +26,11 @@ from .tool_executor import ToolExecutor
 from . import tools as toolkit
 from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
 
-DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
+# Windows 上 shell=True 依赖 COMSPEC/SYSTEMROOT 找到 cmd.exe，缺了就会报 "shell not found"。
+DEFAULT_SHELL_ENV_ALLOWLIST = (
+    "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER",
+    "COMSPEC", "PATHEXT", "SYSTEMDRIVE", "SYSTEMROOT", "WINDIR",
+)
 DEFAULT_FEATURE_FLAGS = {
     "memory": True,
     "relevant_memory": True,
@@ -47,10 +51,10 @@ DURABLE_MEMORY_LINE_PATTERNS = (
 )
 SECRET_SHAPED_TEXT_PATTERN = re.compile(r"(?i)(\b(api[_ -]?key|token|secret|password)\b|sk-[A-Za-z0-9_-]{6,})")
 
-__all__ = ["Pico", "SessionStore"]
+__all__ = ["Kestrel", "SessionStore"]
 
 
-class Pico:
+class Kestrel:
     def __init__(
         self,
         model_client,
@@ -85,7 +89,7 @@ class Pico:
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
         self.allowed_tools = self._normalize_allowed_tools(allowed_tools)
-        self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".pico" / "runs")
+        self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".kestrel" / "runs")
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
             "created_at": now(),
@@ -587,7 +591,7 @@ class Pico:
 
     def spawn_delegate(self, args):
         task = str(args.get("task", "")).strip()
-        child = Pico(
+        child = Kestrel(
             model_client=self.model_client,
             workspace=self.workspace,
             session_store=self.session_store,
@@ -663,35 +667,35 @@ class Pico:
         # 1. <tool>...</tool> 里包 JSON，适合简短调用
         # 2. XML 风格属性/子标签，适合写文件这类多行内容
         if "<tool>" in raw and ("<final>" not in raw or raw.find("<tool>") < raw.find("<final>")):
-            body = Pico.extract(raw, "tool")
+            body = Kestrel.extract(raw, "tool")
             try:
                 payload = json.loads(body)
             except Exception:
-                return "retry", Pico.retry_notice("model returned malformed tool JSON")
+                return "retry", Kestrel.retry_notice("model returned malformed tool JSON")
             if not isinstance(payload, dict):
-                return "retry", Pico.retry_notice("tool payload must be a JSON object")
+                return "retry", Kestrel.retry_notice("tool payload must be a JSON object")
             if not str(payload.get("name", "")).strip():
-                return "retry", Pico.retry_notice("tool payload is missing a tool name")
+                return "retry", Kestrel.retry_notice("tool payload is missing a tool name")
             args = payload.get("args", {})
             if args is None:
                 payload["args"] = {}
             elif not isinstance(args, dict):
-                return "retry", Pico.retry_notice()
+                return "retry", Kestrel.retry_notice()
             return "tool", payload
         if "<tool" in raw and ("<final>" not in raw or raw.find("<tool") < raw.find("<final>")):
-            payload = Pico.parse_xml_tool(raw)
+            payload = Kestrel.parse_xml_tool(raw)
             if payload is not None:
                 return "tool", payload
-            return "retry", Pico.retry_notice()
+            return "retry", Kestrel.retry_notice()
         if "<final>" in raw:
-            final = Pico.extract(raw, "final").strip()
+            final = Kestrel.extract(raw, "final").strip()
             if final:
                 return "final", final
-            return "retry", Pico.retry_notice("model returned an empty <final> answer")
+            return "retry", Kestrel.retry_notice("model returned an empty <final> answer")
         raw = raw.strip()
         if raw:
             return "final", raw
-        return "retry", Pico.retry_notice("model returned an empty response")
+        return "retry", Kestrel.retry_notice("model returned an empty response")
 
     @staticmethod
     def retry_notice(problem=None):
@@ -710,7 +714,7 @@ class Pico:
         match = re.search(r"<tool(?P<attrs>[^>]*)>(?P<body>.*?)</tool>", raw, re.S)
         if not match:
             return None
-        attrs = Pico.parse_attrs(match.group("attrs"))
+        attrs = Kestrel.parse_attrs(match.group("attrs"))
         name = str(attrs.pop("name", "")).strip()
         if not name:
             return None
@@ -719,7 +723,7 @@ class Pico:
         args = dict(attrs)
         for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
             if f"<{key}>" in body:
-                args[key] = Pico.extract_raw(body, key)
+                args[key] = Kestrel.extract_raw(body, key)
 
         body_text = body.strip("\n")
         if name == "write_file" and "content" not in args and body_text:
